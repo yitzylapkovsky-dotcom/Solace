@@ -1623,15 +1623,23 @@
     <div class="settings-section">
       <div class="settings-section-title">🤖 AI Configuration</div>
       <div class="settings-row">
-        <div class="settings-item" style="cursor:default;">
+        <div class="settings-item" style="flex-direction:column; align-items:stretch; gap:10px; cursor:default;">
           <div class="settings-item-left">
             <span class="settings-icon">✨</span>
             <div>
-              <div class="settings-label">AI & Voice — Built in</div>
-              <div class="settings-desc">Powered by Claude AI · Dr. Lauren voice (ElevenLabs)</div>
+              <div class="settings-label">Gemini API Key (free)</div>
+              <div class="settings-desc">Get a free key at <strong>aistudio.google.com</strong> → Get API Key</div>
             </div>
           </div>
-          <span style="font-size:20px;">✅</span>
+          <div style="display:flex; gap:8px;">
+            <input id="gemini-key-input" class="form-input" type="password"
+              placeholder="Paste your Gemini API key here…"
+              style="background:white; flex:1; font-size:13px;"
+              oninput="previewGeminiKey(this.value)" />
+            <button onclick="saveGeminiKey()" style="padding:10px 16px; background:var(--sage-dark); color:white; border:none; border-radius:10px; font-family:'DM Sans',sans-serif; font-size:13px; cursor:pointer; font-weight:500; white-space:nowrap;">Save</button>
+          </div>
+          <div id="gemini-key-status" style="font-size:12px; color:var(--text-lighter); padding-left:2px;"></div>
+          <div style="font-size:12px; color:var(--text-lighter); padding-left:2px;">🎙️ Voice: Dr. Lauren (ElevenLabs) — built in, no key needed</div>
         </div>
       </div>
     </div>
@@ -2084,40 +2092,59 @@ function renderMoodChart() {
 //  Uses Anthropic Claude Haiku — fast, warm, reliable.
 // ══════════════════════════════════
 
-const CLAUDE_API_KEY = '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';
+// ══════════════════════════════════
+//  AI HELPER — Gemini for chat (browser compatible)
+//  Voice: Dr. Lauren via ElevenLabs (built in)
+// ══════════════════════════════════
 
-// callGemini is kept as the function name so all existing calls work unchanged
+const GEMINI_API_KEY = 'AIzaSyBuiltInKeyPlaceholder'; // User adds in Settings
+
 async function callGemini(systemPrompt, messages, maxTokens = 800) {
+  const key = state.geminiKey || localStorage.getItem('solace_gemini_key') || '';
+  if (!key) {
+    return "Please add your free Gemini API key in Settings (⚙️) to enable AI chat. Visit aistudio.google.com — it's free!";
+  }
+
+  const geminiMessages = [];
+  let systemInjected = false;
+  for (const msg of messages) {
+    const role = msg.role === 'assistant' ? 'model' : 'user';
+    let text = msg.content;
+    if (!systemInjected && role === 'user') {
+      text = systemPrompt + '\n\n---\n\n' + text;
+      systemInjected = true;
+    }
+    geminiMessages.push({ role, parts: [{ text }] });
+  }
+  if (!geminiMessages.length) {
+    geminiMessages.push({ role: 'user', parts: [{ text: systemPrompt }] });
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`;
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    const resp = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': CLAUDE_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: messages.map(m => ({
-          role: m.role === 'assistant' ? 'assistant' : 'user',
-          content: m.content,
-        })),
+        contents: geminiMessages,
+        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.8, topP: 0.95 },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+        ],
       })
     });
-
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      if (resp.status === 429) return "I'm a little overwhelmed right now — give me a moment and try again 🌿";
-      if (resp.status === 401) return "There's a configuration issue. Please contact support.";
+      const msg = err?.error?.message || '';
+      if (resp.status === 429) return "I need a brief moment — you've been chatting a lot! Try again in a minute 🌿";
+      if (msg.includes('API_KEY')) return "Your Gemini API key looks invalid. Please check it in Settings (⚙️).";
       return "I'm having a little trouble connecting. Please try again in a moment.";
     }
-
     const data = await resp.json();
-    return data?.content?.[0]?.text || "I'm here with you. Could you say that again?";
-
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text || "I'm here with you. Could you say that again?";
   } catch(e) {
     return "I'm having trouble connecting right now. Please check your internet and try again.";
   }
