@@ -2880,6 +2880,8 @@ const voiceState = {
   ttsSupport:     false,
   voices:         [],
   currentAudio:   null,
+  currentSource:  null,
+  audioCtx:       null,
 };
 
 const VOICE_SYSTEM_PROMPTS = {
@@ -3051,7 +3053,20 @@ function toggleRecording() {
     document.getElementById('voice-text-input').focus();
     return;
   }
-  if (voiceState.isSpeaking) { window.speechSynthesis.cancel(); voiceState.isSpeaking = false; setOrbState('idle'); }
+  // Initialize / resume AudioContext on user gesture (required for iOS Safari)
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) {
+      if (!voiceState.audioCtx || voiceState.audioCtx.state === 'closed') {
+        voiceState.audioCtx = new AC();
+      }
+      if (voiceState.audioCtx.state === 'suspended') {
+        voiceState.audioCtx.resume();
+      }
+    }
+  } catch(e) {}
+
+  if (voiceState.isSpeaking) { stopCurrentSpeech(); voiceState.isSpeaking = false; setOrbState('idle'); }
   if (voiceState.isRecording) {
     voiceState.recognition.stop();
   } else {
@@ -3119,9 +3134,7 @@ async function speakResponse(text) {
     return;
   }
 
-  // Stop anything currently playing
   stopCurrentSpeech();
-
   setOrbState('speaking');
   setVoiceStatus(text);
   animateWaveBars(true);
@@ -3129,10 +3142,13 @@ async function speakResponse(text) {
 
   // Try ElevenLabs first
   try {
+    setVoiceDebug('🎙️ Loading Dr. Lauren voice…');
     await speakWithElevenLabs(text);
+    setVoiceDebug('');
     return;
   } catch(e) {
-    console.warn('[Solace] ElevenLabs failed, falling back to Web Speech:', e.message);
+    console.warn('[Solace] ElevenLabs failed:', e.message);
+    setVoiceDebug('⚠️ Voice failed, using backup…');
   }
 
   // Fallback: Web Speech API
@@ -3164,22 +3180,34 @@ async function speakWithElevenLabs(text) {
     throw new Error(`ElevenLabs error ${resp.status}`);
   }
 
-  const audioBlob = await resp.blob();
-  const audioUrl = URL.createObjectURL(audioBlob);
-  const audio = new Audio(audioUrl);
-  voiceState.currentAudio = audio;
+  const arrayBuffer = await resp.arrayBuffer();
 
-  await new Promise((resolve, reject) => {
-    audio.onended = () => {
-      URL.revokeObjectURL(audioUrl);
+  // Use Web Audio API for iOS Safari compatibility
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) throw new Error('No AudioContext');
+
+  // Reuse or create AudioContext
+  if (!voiceState.audioCtx || voiceState.audioCtx.state === 'closed') {
+    voiceState.audioCtx = new AC();
+  }
+  const ctx = voiceState.audioCtx;
+
+  // Resume context (required on iOS after user gesture)
+  if (ctx.state === 'suspended') await ctx.resume();
+
+  const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(ctx.destination);
+
+  voiceState.currentSource = source;
+
+  await new Promise((resolve) => {
+    source.onended = () => {
       onSpeechDone();
       resolve();
     };
-    audio.onerror = (e) => {
-      URL.revokeObjectURL(audioUrl);
-      reject(new Error('Audio playback failed'));
-    };
-    audio.play().catch(reject);
+    source.start(0);
   });
 }
 
@@ -3232,6 +3260,10 @@ function onSpeechDone() {
 
 function stopCurrentSpeech() {
   try {
+    if (voiceState.currentSource) {
+      voiceState.currentSource.stop();
+      voiceState.currentSource = null;
+    }
     if (voiceState.currentAudio) {
       voiceState.currentAudio.pause();
       voiceState.currentAudio = null;
